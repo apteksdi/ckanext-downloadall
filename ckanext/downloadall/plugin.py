@@ -178,7 +178,7 @@ class DownloadallPlugin(plugins.SingletonPlugin):
         if plugins.get_plugin('datastore'):
             # datastore is enabled, so we need to chain the datastore_create
             # action, to update the zip when it is called
-            actions['datastore_create'] = action.datastore_create
+            actions['datastore_create'] = datastore_create
         return actions
 
 
