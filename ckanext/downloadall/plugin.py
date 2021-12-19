@@ -5,13 +5,92 @@ import ckan.plugins.toolkit as toolkit
 from ckan.lib.jobs import DEFAULT_QUEUE_NAME
 from ckan import model
 
-from tasks import update_zip
-import helpers
-import action
-
-
 log = __import__('logging').getLogger(__name__)
 
+def pop_zip_resource(pkg):
+    '''Finds the zip resource in a package's resources, removes it from the
+    package and returns it. NB the package doesn't have the zip resource in it
+    any more.
+    '''
+    zip_res = None
+    non_zip_resources = []
+    for res in pkg.get('resources', []):
+        if res.get('downloadall_metadata_modified'):
+            zip_res = res
+        else:
+            non_zip_resources.append(res)
+    pkg['resources'] = non_zip_resources
+    return zip_res
+
+@plugins.toolkit.chained_action  # requires CKAN 2.7+
+def datastore_create(original_action, context, data_dict):
+    # This gets called when xloader or datapusher loads a new resource or
+    # data dictionary is changed. We need to regenerate the zip when the latter
+    # happens, and it's ok if it happens at the other times too.
+    result = original_action(context, data_dict)
+
+    # update the zip
+    if 'resource_id' in data_dict:
+        res = model.Resource.get(data_dict['resource_id'])
+        if res:
+            dataset = res.related_packages()[0]
+            plugin.enqueue_update_zip(dataset.name, dataset.id,
+                                      'datastore_create')
+
+    return result
+
+def update_zip(package_id, skip_if_no_changes=True):
+    '''
+    Create/update the a dataset's zip resource, containing the other resources
+    and some metadata.
+    :param skip_if_no_changes: If true, and there is an existing zip for this
+        dataset, it will compare a freshly generated package.json against what
+        is in the existing zip, and if there are no changes (ignoring the
+        Download All Zip) then it will skip downloading the resources and
+        updating the zip.
+    '''
+    # TODO deal with private datasets - 'ignore_auth': True
+    context = {'model': model, 'session': model.Session}
+    dataset = get_action('package_show')(context, {'id': package_id})
+    log.debug('Updating zip: {}'.format(dataset['name']))
+
+    datapackage, ckan_and_datapackage_resources, existing_zip_resource = \
+        generate_datapackage_json(package_id)
+
+    if skip_if_no_changes and existing_zip_resource and \
+            not has_datapackage_changed_significantly(
+                datapackage, ckan_and_datapackage_resources,
+                existing_zip_resource):
+        log.info('Skipping updating the zip - the datapackage.json is not '
+                 'changed sufficiently: {}'.format(dataset['name']))
+        return
+
+    prefix = "{}-".format(dataset[u'name'])
+    with tempfile.NamedTemporaryFile(prefix=prefix, suffix='.zip') as fp:
+        write_zip(fp, datapackage, ckan_and_datapackage_resources)
+
+        # Upload resource to CKAN as a new/updated resource
+        local_ckan = ckanapi.LocalCKAN()
+        fp.seek(0)
+        resource = dict(
+            package_id=dataset['id'],
+            url='dummy-value',
+            upload=fp,
+            name=u'All resource data',
+            format=u'ZIP',
+            downloadall_metadata_modified=dataset['metadata_modified'],
+            downloadall_datapackage_hash=hash_datapackage(datapackage)
+        )
+
+        if not existing_zip_resource:
+            log.debug('Writing new zip resource - {}'.format(dataset['name']))
+            local_ckan.action.resource_create(**resource)
+        else:
+            # TODO update the existing zip resource (using patch?)
+            log.debug('Updating zip resource - {}'.format(dataset['name']))
+            local_ckan.action.resource_patch(
+                id=existing_zip_resource['id'],
+                **resource)
 
 class DownloadallPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.IConfigurer)
