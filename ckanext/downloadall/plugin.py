@@ -154,7 +154,7 @@ class DownloadallPlugin(plugins.SingletonPlugin):
 
     def get_helpers(self):
         return {
-            'downloadall__pop_zip_resource': helpers.pop_zip_resource,
+            'downloadall__pop_zip_resource': pop_zip_resource,
         }
 
     # IPackageController
